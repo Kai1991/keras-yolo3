@@ -16,7 +16,7 @@ from yolo3.utils import get_random_data
 def _main():
     annotation_path = 'train.txt'
     log_dir = 'logs/000/'
-    classes_path = 'model_data/voc_classes.txt'
+    classes_path = 'model_data/coco_classes.txt'
     anchors_path = 'model_data/yolo_anchors.txt'
     class_names = get_classes(classes_path)
     num_classes = len(class_names)
@@ -30,7 +30,7 @@ def _main():
             freeze_body=2, weights_path='model_data/tiny_yolo_weights.h5')
     else:
         model = create_model(input_shape, anchors, num_classes,
-            freeze_body=2, weights_path='model_data/yolo_weights.h5') # make sure you know what you freeze
+            freeze_body=2, weights_path='model_data/yolo.h5') # make sure you know what you freeze
 
     logging = TensorBoard(log_dir=log_dir)
     checkpoint = ModelCheckpoint(log_dir + 'ep{epoch:03d}-loss{loss:.3f}-val_loss{val_loss:.3f}.h5',
@@ -107,11 +107,11 @@ def create_model(input_shape, anchors, num_classes, load_pretrained=True, freeze
     '''create the training model'''
     K.clear_session() # get a new session
     image_input = Input(shape=(None, None, 3))
-    h, w = input_shape
-    num_anchors = len(anchors)
+    h, w = input_shape # 输入图片的高和宽
+    num_anchors = len(anchors) # 锚的数量
 
     y_true = [Input(shape=(h//{0:32, 1:16, 2:8}[l], w//{0:32, 1:16, 2:8}[l], \
-        num_anchors//3, num_classes+5)) for l in range(3)]
+        num_anchors//3, num_classes+5)) for l in range(3)] #构造真值[[h//32,w//32,3,80+5]，[h//16,w//16,3,80+5]，[h//16,w//16,3,80+5]]
 
     model_body = yolo_body(image_input, num_anchors//3, num_classes)
     print('Create YOLOv3 model with {} anchors and {} classes.'.format(num_anchors, num_classes))
@@ -172,13 +172,13 @@ def data_generator(annotation_lines, batch_size, input_shape, anchors, num_class
         for b in range(batch_size):
             if i==0:
                 np.random.shuffle(annotation_lines)
-            image, box = get_random_data(annotation_lines[i], input_shape, random=True)
+            image, box = get_random_data(annotation_lines[i], input_shape, random=True) # 这里的边框数据  是左上点坐标和右下点坐标
             image_data.append(image)
             box_data.append(box)
             i = (i+1) % n
         image_data = np.array(image_data)
         box_data = np.array(box_data)
-        y_true = preprocess_true_boxes(box_data, input_shape, anchors, num_classes)
+        y_true = preprocess_true_boxes(box_data, input_shape, anchors, num_classes) #真值 构造出 模型输出的结构
         yield [image_data, *y_true], np.zeros(batch_size)
 
 def data_generator_wrapper(annotation_lines, batch_size, input_shape, anchors, num_classes):

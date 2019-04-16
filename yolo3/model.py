@@ -18,7 +18,8 @@ from yolo3.utils import compose
 def DarknetConv2D(*args, **kwargs):
     """Wrapper to set Darknet parameters for Convolution2D."""
     darknet_conv_kwargs = {'kernel_regularizer': l2(5e-4)}
-    darknet_conv_kwargs['padding'] = 'valid' if kwargs.get('strides')==(2,2) else 'same'
+    #Padding，一般使用same模式，只有当步长为(2,2)时，使用valid模式。避免在降采样中，引入无用的边界信息
+    darknet_conv_kwargs['padding'] = 'valid' if kwargs.get('strides')==(2,2) else 'same'  
     darknet_conv_kwargs.update(kwargs)
     return Conv2D(*args, **darknet_conv_kwargs)
 
@@ -35,7 +36,7 @@ def resblock_body(x, num_filters, num_blocks):
     '''A series of resblocks starting with a downsampling Convolution2D'''
     # Darknet uses left and top padding instead of 'same' mode
     x = ZeroPadding2D(((1,0),(1,0)))(x)
-    x = DarknetConv2D_BN_Leaky(num_filters, (3,3), strides=(2,2))(x)
+    x = DarknetConv2D_BN_Leaky(num_filters, (3,3), strides=(2,2))(x)# 导致 特征图减小一般的原因在这里
     for i in range(num_blocks):
         y = compose(
                 DarknetConv2D_BN_Leaky(num_filters//2, (1,1)),
@@ -45,12 +46,12 @@ def resblock_body(x, num_filters, num_blocks):
 
 def darknet_body(x):
     '''Darknent body having 52 Convolution2D layers'''
-    x = DarknetConv2D_BN_Leaky(32, (3,3))(x)
-    x = resblock_body(x, 64, 1)
-    x = resblock_body(x, 128, 2)
-    x = resblock_body(x, 256, 8)
-    x = resblock_body(x, 512, 8)
-    x = resblock_body(x, 1024, 4)
+    x = DarknetConv2D_BN_Leaky(32, (3,3))(x) # 卷积 + 标准化 + 激活函数
+    x = resblock_body(x, 64, 1) # 原来特征的 1/2 
+    x = resblock_body(x, 128, 2) # 原来特征的 1/4
+    x = resblock_body(x, 256, 8) # 原来特征的 1/8
+    x = resblock_body(x, 512, 8) # 原来特征的 1/16
+    x = resblock_body(x, 1024, 4) # 原来特征的 1/32
     return x
 
 def make_last_layers(x, num_filters, out_filters):
@@ -69,22 +70,23 @@ def make_last_layers(x, num_filters, out_filters):
 
 def yolo_body(inputs, num_anchors, num_classes):
     """Create YOLO_V3 model CNN body in Keras."""
-    darknet = Model(inputs, darknet_body(inputs))
-    x, y1 = make_last_layers(darknet.output, 512, num_anchors*(num_classes+5))
+    darknet = Model(inputs, darknet_body(inputs)) #(?, 13, 13, 1024) #构造基础网络 darknet
+    # 构造三个输出
+    x, y1 = make_last_layers(darknet.output, 512, num_anchors*(num_classes+5)) # 现在的特征图为原来的 1/32
 
     x = compose(
             DarknetConv2D_BN_Leaky(256, (1,1)),
-            UpSampling2D(2))(x)
-    x = Concatenate()([x,darknet.layers[152].output])
+            UpSampling2D(2))(x) # 上采样后 特征图为原来的 1/16
+    x = Concatenate()([x,darknet.layers[152].output]) # 拼接 backbone 处 1/16的特征图
     x, y2 = make_last_layers(x, 256, num_anchors*(num_classes+5))
 
     x = compose(
             DarknetConv2D_BN_Leaky(128, (1,1)),
-            UpSampling2D(2))(x)
-    x = Concatenate()([x,darknet.layers[92].output])
+            UpSampling2D(2))(x) #上采样 特征图为原来的 1/8 
+    x = Concatenate()([x,darknet.layers[92].output]) # 拼接 backbone 处 1/8的特征图
     x, y3 = make_last_layers(x, 128, num_anchors*(num_classes+5))
 
-    return Model(inputs, [y1,y2,y3])
+    return Model(inputs, [y1,y2,y3]) # 输出为 y1: 13*13*225   y2:26*26*225   y3:52*52*225
 
 def tiny_yolo_body(inputs, num_anchors, num_classes):
     '''Create Tiny YOLO_v3 model CNN body in keras.'''
@@ -120,11 +122,13 @@ def tiny_yolo_body(inputs, num_anchors, num_classes):
 
 
 def yolo_head(feats, anchors, num_classes, input_shape, calc_loss=False):
+    # feats 三个预测值中的一个
     """Convert final layer features to bounding box parameters."""
-    num_anchors = len(anchors)
+    num_anchors = len(anchors) # anchor 的数量
     # Reshape to batch, height, width, num_anchors, box_params.
     anchors_tensor = K.reshape(K.constant(anchors), [1, 1, 1, num_anchors, 2])
 
+    # 构造anchor网格
     grid_shape = K.shape(feats)[1:3] # height, width
     grid_y = K.tile(K.reshape(K.arange(0, stop=grid_shape[0]), [-1, 1, 1, 1]),
         [1, grid_shape[1], 1, 1])
@@ -134,16 +138,19 @@ def yolo_head(feats, anchors, num_classes, input_shape, calc_loss=False):
     grid = K.cast(grid, K.dtype(feats))
 
     feats = K.reshape(
-        feats, [-1, grid_shape[0], grid_shape[1], num_anchors, num_classes + 5])
+        feats, [-1, grid_shape[0], grid_shape[1], num_anchors, num_classes + 5]) # 本来就是这个形状为什么还要reshape？？？？
 
     # Adjust preditions to each spatial grid point and anchor size.
+    # #把特征图的输出转换成 相对于特征图的比例 和坐标相对于整张图像的比例是等价的  其实可以理解成   相对于输入
     box_xy = (K.sigmoid(feats[..., :2]) + grid) / K.cast(grid_shape[::-1], K.dtype(feats))
+     #把宽高 wh转换成相对于整张图像的比例
     box_wh = K.exp(feats[..., 2:4]) * anchors_tensor / K.cast(input_shape[::-1], K.dtype(feats))
     box_confidence = K.sigmoid(feats[..., 4:5])
     box_class_probs = K.sigmoid(feats[..., 5:])
 
     if calc_loss == True:
         return grid, feats, box_xy, box_wh
+    #此时xy wh都是相对于图像大小的比例值
     return box_xy, box_wh, box_confidence, box_class_probs
 
 
@@ -234,7 +241,7 @@ def preprocess_true_boxes(true_boxes, input_shape, anchors, num_classes):
 
     Parameters
     ----------
-    true_boxes: array, shape=(m, T, 5)
+    true_boxes: array, shape=(m, T, 5) # （批次 ， 20 ，5）
         Absolute x_min, y_min, x_max, y_max, class_id relative to input_shape.
     input_shape: array-like, hw, multiples of 32
     anchors: array, shape=(N, 2), wh
@@ -246,42 +253,47 @@ def preprocess_true_boxes(true_boxes, input_shape, anchors, num_classes):
 
     '''
     assert (true_boxes[..., 4]<num_classes).all(), 'class id must be less than num_classes'
-    num_layers = len(anchors)//3 # default setting
+    num_layers = len(anchors)//3 # default setting  3
     anchor_mask = [[6,7,8], [3,4,5], [0,1,2]] if num_layers==3 else [[3,4,5], [1,2,3]]
 
     true_boxes = np.array(true_boxes, dtype='float32')
     input_shape = np.array(input_shape, dtype='int32')
-    boxes_xy = (true_boxes[..., 0:2] + true_boxes[..., 2:4]) // 2
-    boxes_wh = true_boxes[..., 2:4] - true_boxes[..., 0:2]
+    # 转化成中点 和边框宽高格式
+    boxes_xy = (true_boxes[..., 0:2] + true_boxes[..., 2:4]) // 2 
+    boxes_wh = true_boxes[..., 2:4] - true_boxes[..., 0:2] # (批次，20,2)
+    # 归一化操作  相对于 输入图片
     true_boxes[..., 0:2] = boxes_xy/input_shape[::-1]
     true_boxes[..., 2:4] = boxes_wh/input_shape[::-1]
 
-    m = true_boxes.shape[0]
-    grid_shapes = [input_shape//{0:32, 1:16, 2:8}[l] for l in range(num_layers)]
+    m = true_boxes.shape[0] #批次数量
+    grid_shapes = [input_shape//{0:32, 1:16, 2:8}[l] for l in range(num_layers)] #[[13,13], [26,26], [52,52]] 最后输出框的大小
     y_true = [np.zeros((m,grid_shapes[l][0],grid_shapes[l][1],len(anchor_mask[l]),5+num_classes),
-        dtype='float32') for l in range(num_layers)]
+        dtype='float32') for l in range(num_layers)] #shape [[?,13,13,3,85], [?,26,26,3,85], [?,52,52,3,85]]
 
     # Expand dim to apply broadcasting.
-    anchors = np.expand_dims(anchors, 0)
+    anchors = np.expand_dims(anchors, 0) #(1,9,2)
+    # 构造anchor的 左上点坐标，和右下点坐标。 坐标系已anchor的中心为中心点
     anchor_maxes = anchors / 2.
     anchor_mins = -anchor_maxes
-    valid_mask = boxes_wh[..., 0]>0
+    valid_mask = boxes_wh[..., 0]>0  # (批次，20)  boxes_wh[..., 0]  获取第一列  标记哪个有框
 
     for b in range(m):
         # Discard zero rows.
-        wh = boxes_wh[b, valid_mask[b]]
+        wh = boxes_wh[b, valid_mask[b]] # 有框的数据
         if len(wh)==0: continue
         # Expand dim to apply broadcasting.
         wh = np.expand_dims(wh, -2)
-        box_maxes = wh / 2.
+        # 和anchor的坐标一样的道理
+        box_maxes = wh / 2. # 不明白为什么 除以2
         box_mins = -box_maxes
 
-        intersect_mins = np.maximum(box_mins, anchor_mins)
+        #计算这个9个anchor哪个最接近 真是的框，就把这个框的信息放在对应的层上，上这层预测输出。
+        intersect_mins = np.maximum(box_mins, anchor_mins)  # np.maximum（） 具有传播性
         intersect_maxes = np.minimum(box_maxes, anchor_maxes)
         intersect_wh = np.maximum(intersect_maxes - intersect_mins, 0.)
-        intersect_area = intersect_wh[..., 0] * intersect_wh[..., 1]
-        box_area = wh[..., 0] * wh[..., 1]
-        anchor_area = anchors[..., 0] * anchors[..., 1]
+        intersect_area = intersect_wh[..., 0] * intersect_wh[..., 1] # 交叉处的面积
+        box_area = wh[..., 0] * wh[..., 1] # 真实框的面积
+        anchor_area = anchors[..., 0] * anchors[..., 1] #anchor的面积
         iou = intersect_area / (box_area + anchor_area - intersect_area)
 
         # Find best anchor for each true box
@@ -297,7 +309,7 @@ def preprocess_true_boxes(true_boxes, input_shape, anchors, num_classes):
                     y_true[l][b, j, i, k, 0:4] = true_boxes[b,t, 0:4]
                     y_true[l][b, j, i, k, 4] = 1
                     y_true[l][b, j, i, k, 5+c] = 1
-
+    # xy,wh 相对于输入图片的大小
     return y_true
 
 
@@ -359,28 +371,35 @@ def yolo_loss(args, anchors, num_classes, ignore_thresh=.5, print_loss=False):
 
     '''
     num_layers = len(anchors)//3 # default setting
-    yolo_outputs = args[:num_layers]
-    y_true = args[num_layers:]
+    yolo_outputs = args[:num_layers] # 模型的输出
+    y_true = args[num_layers:] # 标签数据
     anchor_mask = [[6,7,8], [3,4,5], [0,1,2]] if num_layers==3 else [[3,4,5], [1,2,3]]
-    input_shape = K.cast(K.shape(yolo_outputs[0])[1:3] * 32, K.dtype(y_true[0]))
-    grid_shapes = [K.cast(K.shape(yolo_outputs[l])[1:3], K.dtype(y_true[0])) for l in range(num_layers)]
+    input_shape = K.cast(K.shape(yolo_outputs[0])[1:3] * 32, K.dtype(y_true[0])) # 输入的shape
+    grid_shapes = [K.cast(K.shape(yolo_outputs[l])[1:3], K.dtype(y_true[0])) for l in range(num_layers)] # 模型数据的shape
     loss = 0
-    m = K.shape(yolo_outputs[0])[0] # batch size, tensor
+    m = K.shape(yolo_outputs[0])[0] # batch size, tensor 批次
     mf = K.cast(m, K.dtype(yolo_outputs[0]))
 
     for l in range(num_layers):
-        object_mask = y_true[l][..., 4:5]
-        true_class_probs = y_true[l][..., 5:]
+        object_mask = y_true[l][..., 4:5] # 置信度，是否有对象
+        true_class_probs = y_true[l][..., 5:]  # 分类的概率
 
+        # 这里拿到的xy的值是相对值，相对于输入的图片
         grid, raw_pred, pred_xy, pred_wh = yolo_head(yolo_outputs[l],
-             anchors[anchor_mask[l]], num_classes, input_shape, calc_loss=True)
+             anchors[anchor_mask[l]], num_classes, input_shape, calc_loss=True) # 构造 grid, 预测值，预测的xy,预测的wh
         pred_box = K.concatenate([pred_xy, pred_wh])
 
         # Darknet raw box to calculate loss.
         raw_true_xy = y_true[l][..., :2]*grid_shapes[l][::-1] - grid
         raw_true_wh = K.log(y_true[l][..., 2:4] / anchors[anchor_mask[l]] * input_shape[::-1])
         raw_true_wh = K.switch(object_mask, raw_true_wh, K.zeros_like(raw_true_wh)) # avoid log(0)=-inf
-        box_loss_scale = 2 - y_true[l][...,2:3]*y_true[l][...,3:4]
+        '''
+        大框给小权重，小框给大权重，因为大框的xywh不需要学得那么好，而小框则对xywh很敏感
+        
+        为了调整不同大小的预测框所占损失的比重，真值框越小，
+        box_loss_scale越大，这样越小的框的损失占比越大，和v1，v2里采用sqrt(w)的目的一样
+        '''
+        box_loss_scale = 2 - y_true[l][...,2:3]*y_true[l][...,3:4] 
 
         # Find ignore mask, iterate over each of batch.
         ignore_mask = tf.TensorArray(K.dtype(y_true[0]), size=1, dynamic_size=True)

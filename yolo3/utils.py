@@ -33,12 +33,13 @@ def letterbox_image(image, size):
 def rand(a=0, b=1):
     return np.random.rand()*(b-a) + a
 
+# 1.解析数据 读取图片，解析边框
 def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jitter=.3, hue=.1, sat=1.5, val=1.5, proc_img=True):
     '''random preprocessing for real-time data augmentation'''
     line = annotation_line.split()
     image = Image.open(line[0])
-    iw, ih = image.size
-    h, w = input_shape
+    iw, ih = image.size # 图片的大小
+    h, w = input_shape # 输入大小
     box = np.array([np.array(list(map(int,box.split(',')))) for box in line[1:]])
 
     if not random:
@@ -51,17 +52,17 @@ def get_random_data(annotation_line, input_shape, random=True, max_boxes=20, jit
         image_data=0
         if proc_img:
             image = image.resize((nw,nh), Image.BICUBIC)
-            new_image = Image.new('RGB', (w,h), (128,128,128))
+            new_image = Image.new('RGB', (w,h), (128,128,128)) #将图片等比例转换为416x416的图片，其余用灰色填充，即(128, 128, 128)
             new_image.paste(image, (dx, dy))
-            image_data = np.array(new_image)/255.
+            image_data = np.array(new_image)/255. #归一化数据
 
         # correct boxes
         box_data = np.zeros((max_boxes,5))
         if len(box)>0:
             np.random.shuffle(box)
-            if len(box)>max_boxes: box = box[:max_boxes]
-            box[:, [0,2]] = box[:, [0,2]]*scale + dx
-            box[:, [1,3]] = box[:, [1,3]]*scale + dy
+            if len(box)>max_boxes: box = box[:max_boxes] # 最多20个
+            box[:, [0,2]] = box[:, [0,2]]*scale + dx #边界框box等比例缩小，再加上填充的偏移量dx和dy
+            box[:, [1,3]] = box[:, [1,3]]*scale + dy #边界框box等比例缩小，再加上填充的偏移量dx和dy
             box_data[:len(box)] = box
 
         return image_data, box_data
